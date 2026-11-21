@@ -22,7 +22,9 @@ const FIXTURE_STYLES: { key: FixtureStyle; name: string }[] = [
   { key: 'plain', name: 'ARS' },
 ];
 
-const INFO_BTN = 'button[aria-label="View player information"]';
+const INFO_BTN = 'button[aria-label="View player information"]'; // Player Selection list rows
+const PITCH_BTN = 'button[data-pitch-element="true"]'; // squad cards on the pitch
+const KEEPER_SHIRT = /shirt_\d+_1-/; // FPL serves `shirt_<team>_1` for goalkeeper kits
 const MARK = 'data-haul-proto';
 const CLS = 'haul-proto';
 
@@ -86,23 +88,34 @@ function fakeFor(name: string, isKeeper: boolean): Fake {
 
 // ---------- state ----------
 
-interface State { variant: VariantKey; fixtureStyle: FixtureStyle }
+type RowMode = 'row' | 'inline' | 'off';
+const ROW_MODES: { key: RowMode; name: string }[] = [
+  { key: 'row', name: 'rows: extra line' },
+  { key: 'inline', name: 'rows: compact' },
+  { key: 'off', name: 'rows: off' },
+];
+
+interface State { variant: VariantKey; fixtureStyle: FixtureStyle; rowMode: RowMode }
 
 function readState(): State {
   const url = new URL(location.href);
   const v = (url.searchParams.get('haul') || sessionStorage.getItem('haul-proto-variant') || 'A').toUpperCase();
   const f = (url.searchParams.get('haulfx') || sessionStorage.getItem('haul-proto-fx') || 'ha');
+  const r = (url.searchParams.get('haulrows') || sessionStorage.getItem('haul-proto-rows') || 'row');
   return {
     variant: (VARIANTS.some((x) => x.key === v) ? v : 'A') as VariantKey,
     fixtureStyle: (FIXTURE_STYLES.some((x) => x.key === f) ? f : 'ha') as FixtureStyle,
+    rowMode: (ROW_MODES.some((x) => x.key === r) ? r : 'row') as RowMode,
   };
 }
 function writeState(s: State) {
   sessionStorage.setItem('haul-proto-variant', s.variant);
   sessionStorage.setItem('haul-proto-fx', s.fixtureStyle);
+  sessionStorage.setItem('haul-proto-rows', s.rowMode);
   const url = new URL(location.href);
   url.searchParams.set('haul', s.variant);
   url.searchParams.set('haulfx', s.fixtureStyle);
+  url.searchParams.set('haulrows', s.rowMode);
   history.replaceState(history.state, '', url.toString());
 }
 
@@ -169,35 +182,37 @@ function renderExpected(d: Fake, dir: 'row' | 'col'): HTMLElement {
 
 // ---------- mounting ----------
 
-/** Walk up from the info button to the smallest ancestor that is the only
- *  info-button carrier among its siblings: that is the card (or row). */
-function findCardRoot(btn: Element): Element | null {
-  let node: Element = btn;
-  while (node.parentElement) {
-    const parent = node.parentElement;
-    if (parent.id === 'root' || parent.tagName === 'BODY') return node;
-    const siblingsWithBtn = Array.from(parent.children).filter((c) => c.querySelector(INFO_BTN) || c.matches(INFO_BTN));
-    if (siblingsWithBtn.length > 1) return node;
-    node = parent;
-  }
-  return null;
+// Verified against a logged-in DOM dump of /en/transfers (2026-11-21):
+//  pitch:  div (slot) > div (wrapper) > button[data-pitch-element] {price, shirt <picture>, name, [data-fixture-bar] label}
+//                                     + div {button[aria-label^="Remove player "]}
+//  list:   table[aria-label=Goalkeepers|Defenders|Midfielders|Forwards] > tbody > tr
+//            > td {button[aria-label="View player information"]} > th[scope=row] {shirt, "Name, Team" hidden span, name} > td price > td TP > td actions
+
+function isKeeper(root: Element): boolean {
+  const img = root.querySelector('img[src*="/shirts/"]') as HTMLImageElement | null;
+  return !!img && KEEPER_SHIRT.test(img.getAttribute('src') || '');
 }
 
-function nameFor(root: Element, idx: number): string {
-  // The DOM carries no player id; the visually hidden text in the button is
-  // the most reliable label we have. Fall back to a stable index seed.
-  const hidden = root.querySelector(INFO_BTN)?.textContent?.trim();
-  const text = (hidden && hidden.length > 1 ? hidden : root.textContent || '').replace(/\s+/g, ' ').trim();
-  return text || `card-${idx}`;
+function seedFor(root: Element, fallback: string): string {
+  const hidden = root.querySelector('[class*="_visuallyHidden"]')?.textContent?.trim();
+  const text = (hidden || root.textContent || '').replace(/\s+/g, ' ').trim();
+  return text || fallback;
 }
 
 function clearOurs(root: Element) {
   root.querySelectorAll(`.${CLS}`).forEach((n) => n.remove());
   (root as HTMLElement).classList.remove('hp-host', 'hp-host-flank');
+  if (root.tagName === 'TR') {
+    const next = root.nextElementSibling;
+    if (next && next.classList.contains(CLS)) next.remove();
+  }
 }
 
 function mountCard(root: HTMLElement, d: Fake, s: State) {
   root.classList.add('hp-host');
+  // The slot and wrapper come with whatever overflow the site sets; make sure our additions show.
+  root.style.overflow = 'visible';
+  if (root.parentElement) root.parentElement.style.overflow = 'visible';
   if (s.variant === 'A') {
     const box = el('div', 'hp-box hp-stack');
     const line = el('div', 'hp-line');
@@ -224,49 +239,69 @@ function mountCard(root: HTMLElement, d: Fake, s: State) {
   }
 }
 
-function mountRow(root: HTMLElement, d: Fake, s: State) {
-  // Rows get one inline strip appended to the cell that holds the info button
-  // (or the row itself when there is no cell). Variant D shrinks it.
-  root.classList.add('hp-host');
-  const cell = (root.querySelector(INFO_BTN)?.closest('td, th, li, div') as HTMLElement | null) || root;
-  const strip = el('div', s.variant === 'D' ? 'hp-rowstrip hp-compact' : 'hp-rowstrip');
-  if (s.variant === 'D') {
-    strip.append(renderFixtureRun(d, s.fixtureStyle, 'mini'), el('span', 'hp-mini-xp', `xP ${d.xp.toFixed(1)}`));
-  } else {
+function mountRow(tr: HTMLTableRowElement, d: Fake, s: State) {
+  tr.classList.add('hp-host');
+  if (s.rowMode === 'row') {
+    // A full-width line under the player row.
+    const extra = el('tr', 'hp-extra-row');
+    const td = el('td', 'hp-extra-cell');
+    td.colSpan = tr.children.length;
+    const strip = el('div', 'hp-rowstrip');
     strip.append(renderFixtureRun(d, s.fixtureStyle, 'full'), renderRecentPoints(d, 'row'), renderExpected(d, 'row'));
+    td.append(strip);
+    extra.append(td);
+    tr.after(extra);
+  } else {
+    // One compact line under the name, inside the player cell; hover for the full blocks.
+    const cell = (tr.querySelector('th[scope="row"]') as HTMLElement | null) || tr;
+    cell.classList.add('hp-host');
+    const strip = el('div', 'hp-rowstrip hp-compact');
+    strip.append(renderFixtureRun(d, s.fixtureStyle, 'mini'), el('span', 'hp-mini-xp', `xP ${d.xp.toFixed(1)}`));
+    const pop = el('div', 'hp-pop hp-pop-row');
+    pop.append(renderFixtureRun(d, s.fixtureStyle, 'full'), renderRecentPoints(d, 'row'), renderExpected(d, 'row'));
+    cell.append(strip, pop);
   }
-  cell.append(strip);
 }
 
 function onInjectablePage(): boolean {
   return /\/(transfers|my-team)(\/|$)/.test(location.pathname);
 }
 
+function removeOrphanRows() {
+  document.querySelectorAll(`tr.${CLS}`).forEach((tr) => {
+    const prev = tr.previousElementSibling;
+    if (!prev || !prev.hasAttribute(MARK)) tr.remove();
+  });
+}
+
 function injectAll(s: State) {
   stats.runs++;
   if (!onInjectablePage()) { stats.cards = 0; stats.rows = 0; updateBar(); return; }
-  const stamp = `${s.variant}-${s.fixtureStyle}`;
-  const roots = new Set<Element>();
-  document.querySelectorAll(INFO_BTN).forEach((btn) => {
-    const root = findCardRoot(btn);
-    if (root) roots.add(root);
-  });
-  let cards = 0, rows = 0, pitchIdx = 0;
-  for (const root of roots) {
-    const isRow = !!root.closest('table') || root.tagName === 'TR' || root.tagName === 'LI';
-    if (isRow) rows++; else cards++;
-    const idx = isRow ? -1 : pitchIdx++;
-    if (root.getAttribute(MARK) === stamp && root.querySelector(`.${CLS}`)) continue;
+  const stamp = `${s.variant}-${s.fixtureStyle}-${s.rowMode}`;
+  removeOrphanRows();
+
+  const cardRoots: HTMLElement[] = [];
+  document.querySelectorAll(PITCH_BTN).forEach((btn) => { if (btn.parentElement) cardRoots.push(btn.parentElement); });
+  const rowRoots: HTMLTableRowElement[] = [];
+  document.querySelectorAll(INFO_BTN).forEach((btn) => { const tr = btn.closest('tr'); if (tr) rowRoots.push(tr); });
+
+  const handle = (root: HTMLElement, mount: () => void) => {
+    if (root.getAttribute(MARK) === stamp && (root.querySelector(`.${CLS}`) || (root.tagName === 'TR' && root.nextElementSibling?.classList.contains(CLS)))) return;
     if (seenRoots.has(root) && root.getAttribute(MARK) === stamp) stats.reinjections++; // React wiped our nodes
     clearOurs(root);
     root.setAttribute(MARK, stamp);
     seenRoots.add(root);
-    const isKeeper = !isRow && (idx === 0 || idx === 11);
-    const d = fakeFor(nameFor(root, idx), isKeeper);
-    if (isRow) mountRow(root as HTMLElement, d, s); else mountCard(root as HTMLElement, d, s);
+    mount();
     stats.injections++;
+  };
+
+  cardRoots.forEach((root, i) => handle(root, () => mountCard(root, fakeFor(seedFor(root, `card-${i}`), isKeeper(root)), s)));
+  if (s.rowMode !== 'off') {
+    rowRoots.forEach((tr, i) => handle(tr, () => mountRow(tr, fakeFor(seedFor(tr, `row-${i}`), isKeeper(tr)), s)));
+  } else {
+    rowRoots.forEach((tr) => { if (tr.hasAttribute(MARK)) { clearOurs(tr); tr.removeAttribute(MARK); } });
   }
-  stats.cards = cards; stats.rows = rows;
+  stats.cards = cardRoots.length; stats.rows = rowRoots.length;
   updateBar();
 }
 
@@ -276,6 +311,7 @@ let bar: HTMLElement | null = null;
 let statsEl: HTMLElement | null = null;
 let variantEl: HTMLElement | null = null;
 let fxEl: HTMLElement | null = null;
+let rowsEl: HTMLElement | null = null;
 
 function buildBar(s: State, onChange: (s: State) => void) {
   bar = el('div', 'hp-bar');
@@ -294,8 +330,14 @@ function buildBar(s: State, onChange: (s: State) => void) {
     s.fixtureStyle = FIXTURE_STYLES[(i + 1) % FIXTURE_STYLES.length]!.key;
     onChange(s);
   };
+  const cycleRows = () => {
+    const i = ROW_MODES.findIndex((v) => v.key === s.rowMode);
+    s.rowMode = ROW_MODES[(i + 1) % ROW_MODES.length]!.key;
+    onChange(s);
+  };
   variantEl = el('span', 'hp-label');
   fxEl = el('span', 'hp-label hp-fx');
+  rowsEl = el('span', 'hp-label hp-fx');
   statsEl = el('span', 'hp-stats');
   bar.append(
     el('span', 'hp-tag', 'haul proto'),
@@ -305,6 +347,9 @@ function buildBar(s: State, onChange: (s: State) => void) {
     el('span', 'hp-sep', '|'),
     btn('fixtures', 'Cycle how home/away shows in the fixture run', cycleFx),
     fxEl,
+    el('span', 'hp-sep', '|'),
+    btn('rows', 'Cycle how Player Selection rows are treated', cycleRows),
+    rowsEl,
     el('span', 'hp-sep', '|'),
     statsEl,
     el('span', 'hp-sep', '|'),
@@ -324,13 +369,14 @@ function buildBar(s: State, onChange: (s: State) => void) {
 let lastState: State | null = null;
 function updateBar(s?: State) {
   if (s) lastState = s;
-  if (!lastState || !variantEl || !fxEl || !statsEl) return;
+  if (!lastState || !variantEl || !fxEl || !rowsEl || !statsEl) return;
   const v = VARIANTS.find((x) => x.key === lastState!.variant)!;
   const f = FIXTURE_STYLES.find((x) => x.key === lastState!.fixtureStyle)!;
   variantEl.textContent = `${v.key} · ${v.name}`;
   fxEl.textContent = f.name;
+  rowsEl.textContent = ROW_MODES.find((x) => x.key === lastState!.rowMode)!.name;
   statsEl.textContent = onInjectablePage()
-    ? `${stats.cards} cards · ${stats.rows} rows · ${stats.injections} inj · ${stats.reinjections} re-inj · ${stats.runs} runs`
+    ? `pitch ${stats.cards} · rows ${stats.rows} · inj ${stats.injections} · re-inj ${stats.reinjections} · runs ${stats.runs}`
     : `not a transfers/pick-team page · ${stats.runs} runs`;
 }
 
@@ -385,7 +431,7 @@ const CSS = `
 .hp-x { display: inline-flex; gap: 2px; align-items: baseline; background: #fff; border: 1px solid #ddd; border-radius: 2px; padding: 0 2px; }
 .hp-xk { color: #666; font-size: 8px; }
 .hp-xv { font-weight: 700; font-size: 9px; }
-.hp-flank { position: absolute; top: 0; display: flex; flex-direction: column; gap: 1px; z-index: 5; }
+.hp-flank { position: absolute; top: 26px; display: flex; flex-direction: column; gap: 1px; z-index: 5; }
 .hp-flank.hp-left { right: 100%; margin-right: 2px; align-items: flex-end; }
 .hp-flank.hp-right { left: 100%; margin-left: 2px; align-items: flex-start; }
 .hp-compact { flex-direction: row; gap: 4px; align-items: center; justify-content: center; }
@@ -393,14 +439,22 @@ const CSS = `
 .hp-mini-xp { font-size: 9px; font-weight: 700; }
 .hp-pop { display: none; position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%); z-index: 50; background: #fff; border: 1px solid #bbb; border-radius: 4px; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,.25); flex-direction: column; gap: 3px; align-items: center; }
 .hp-host:hover > .hp-pop { display: flex; }
-.hp-rowstrip { display: flex; gap: 6px; align-items: center; margin-top: 2px; flex-wrap: wrap; }
+.hp-rowstrip { display: flex; gap: 8px; align-items: center; margin-top: 2px; flex-wrap: wrap; }
+.hp-extra-row { background: rgba(255,255,255,.06); }
+.hp-extra-cell { padding: 3px 8px 5px 44px !important; }
+.hp-extra-cell .hp-fdr { font-size: 9px; min-width: 18px; }
+.hp-extra-cell .hp-pt { font-size: 10px; min-width: 17px; }
+.hp-extra-cell .hp-xv { font-size: 10px; }
+.hp-pop-row { left: 0; transform: none; bottom: auto; top: 100%; }
+.hp-host .hp-pop-row { display: none; }
+.hp-host:hover > .hp-pop-row { display: flex; }
 .hp-rowstrip.hp-compact { gap: 4px; }
 .hp-bar { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 2147483647; display: flex; gap: 6px; align-items: center; background: #111; color: #fff; padding: 6px 10px; border-radius: 999px; box-shadow: 0 4px 16px rgba(0,0,0,.4); font-size: 12px; white-space: nowrap; }
 .hp-bar .hp-tag { color: #ffd166; font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: .5px; }
 .hp-bar .hp-btn { background: #333; color: #fff; border: 0; border-radius: 999px; padding: 2px 8px; cursor: pointer; font-size: 12px; }
 .hp-bar .hp-btn:hover { background: #555; }
 .hp-bar .hp-label { font-weight: 600; min-width: 150px; text-align: center; }
-.hp-bar .hp-fx { min-width: 60px; }
+.hp-bar .hp-fx { min-width: 60px; font-weight: 400; color: #ddd; }
 .hp-bar .hp-sep { color: #666; }
 .hp-bar .hp-stats { color: #bbb; font-variant-numeric: tabular-nums; }
 `;

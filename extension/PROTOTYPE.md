@@ -14,7 +14,7 @@ Alternative: `npm run dev` launches Zen through web-ext with a copy of the "Defa
 
 ## What to look at
 
-A black pill at the bottom of the page switches variants (`◀ ▶` or arrow keys), cycles how home/away shows in the fixture run, shows live counters, and dumps the page DOM.
+A black pill at the bottom of the page switches variants (`◀ ▶` or arrow keys), cycles how home/away shows in the fixture run, cycles how Player Selection rows are treated (`rows`: extra line under each row, compact line under the name with hover detail, or off so you can judge the pitch alone), shows live counters, and dumps the page DOM.
 
 | Key | Variant |
 |---|---|
@@ -23,9 +23,11 @@ A black pill at the bottom of the page switches variants (`◀ ▶` or arrow key
 | C | Mirror of B: expected panel left, recent points right |
 | D | One compact strip (five FDR squares, points digits, xP); hover the card for the full three blocks |
 
-The variant is also in the URL as `?haul=A&haulfx=ha` and survives in-page navigation via sessionStorage.
+The variant is also in the URL as `?haul=A&haulfx=ha&haulrows=row` and survives in-page navigation via sessionStorage.
 
-Counters: `cards` (pitch squad cards found), `rows` (Player Selection or list rows found), `inj` (total injections), `re-inj` (times React recreated a card after we had injected into it), `runs` (observer passes).
+Counters: `pitch` (squad cards found via `button[data-pitch-element]`), `rows` (Player Selection rows found via the info button), `inj` (total injections), `re-inj` (times React wiped our nodes from a card we had already marked), `runs` (observer passes).
+
+Verified offline against a logged-in DOM dump of `/en/transfers` (2026-11-21): 15 pitch cards, 30 rows, keepers detected from the `shirt_<team>_1` kit image.
 
 ## What to collect
 
