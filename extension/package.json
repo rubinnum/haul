@@ -1,0 +1,17 @@
+{
+  "name": "haul-extension-prototype",
+  "private": true,
+  "type": "module",
+  "description": "PROTOTYPE: throwaway stub injection on the FPL transfers page. Not production code.",
+  "scripts": {
+    "build": "wxt build -b firefox --mv3",
+    "dev": "wxt dev -b firefox --mv3",
+    "postinstall": "wxt prepare",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0",
+    "web-ext": "^10.8.0",
+    "wxt": "^0.21.5"
+  }
+}
