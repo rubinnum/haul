@@ -1,0 +1,156 @@
+# Next-game projection sources
+
+Research for [issue #15](https://github.com/rubinnum/haul/issues/15). Which sources publish per-gameweek next-game projections for FPL players (predicted points, predicted xG/xA, clean sheet odds), what it costs to use them, and whether we should build our own. Checked on 2026-11-21, a few hours before the GW11 deadline (11:00Z). Builds on the [official API](official-fpl-api.md) and [third-party data](third-party-fpl-data.md) notes.
+
+The three r/FantasyPL posts in the ticket could not be read: `www.reddit.com` and `old.reddit.com` return a JS shell or a redirect to automated clients, the `.json` suffix does the same, the fetch tools refuse the domain outright, and web search excludes it. So the "sources behind the posts" are inferred from what publishes the same kind of table each week, not confirmed from the threads themselves.
+
+## Short answer
+
+- No external source gives the whole expected panel (xG, xA, xP for outfield players; clean sheet odds and xP for keepers) in a form we may redistribute. Every paid site forbids extraction; the two free ones either forbid publishing their data (FPL Form) or only publish xP, frozen a week or two before the deadline (Onside Arena).
+- The official API's `ep_next` is not a projection. Checked against all 672 players: it equals `form` times `chance_of_playing_next_round / 100` for 670 of them (the other two are debutants with `form` 0). It ignores the fixture entirely.
+- The official API does carry every input a simple model needs: `expected_goals_per_90`, `expected_assists_per_90`, `expected_goals_conceded_per_90`, `minutes`, `starts`, `chance_of_playing_next_round`, team `strength_attack_*` / `strength_defence_*`, and FDR per fixture. Per-match xG, xA and xGC per player are in `element-summary/{id}/history[]`.
+- Published accuracy records say the ceiling is low and the field is tight: FPL Review's own study puts six commercial models within 0.08 RMSE of each other and of a simulated "perfect" model; Onside's blind test puts `ep_next` at 1.06 MAE against its own 0.96. A transparent own model will not be far off the paid ones.
+- Recommendation: **own model in `fpl-analysis`, with `ep_next` kept as the displayed baseline and Onside's CC-BY graded CSV as the free backtest set.** Details and the hybrid variant below.
+
+## What the expected panel needs
+
+From `GLOSSARY.md`: for outfield players, next-game expected goals, assists and points; for goalkeepers, clean sheet odds and expected points. Each must attach to an FPL element id, update between the previous gameweek and the deadline (ideally after team news), and be legal to display inside an extension that may later be published.
+
+## Candidates
+
+### Official FPL API (`ep_next`, `form`, xG fields)
+
+- **What it has.** `ep_next` and `ep_this` on every element in `bootstrap-static/`. Observed on 2026-11-21: `ep_next == ep_this` for every player (both point at GW11 before its deadline), and `ep_next == round(form * chance / 100, 1)` where `chance` is `chance_of_playing_next_round` (100 when null) for 670 of 672 players. Examples: Khusanov `form 2.7`, chance 50, `ep_next 1.4`; Dorgu `form 3.7`, chance 75, `ep_next 2.8`; N.Jackson `form 11.0`, `ep_next 11.0`. The two misses (Cissé, Gunter) have `form 0.0` and a non-zero `ep_next`, so a fallback exists for players with no recent minutes, probably last season's data. `form` is FPL's 30-day points average (community definition; the help page is a JS shell and could not be quoted).
+- **Consequence.** `ep_next` carries no fixture, venue, or minutes information beyond the injury flag. A player on 11 points of form gets 11 against anyone. It is a useful baseline and a sanity check, not a projection.
+- **Model inputs available.** Per element: `expected_goals_per_90`, `expected_assists_per_90`, `expected_goal_involvements_per_90`, `expected_goals_conceded_per_90`, `minutes`, `starts`, `status`, `chance_of_playing_next_round`, `penalties_order`, set-piece orders. Per team: `strength`, `strength_attack_home/away`, `strength_defence_home/away`, `strength_overall_home/away`. Per fixture: `team_h_difficulty`, `team_a_difficulty`. Per player per match: `element-summary/{id}/history[]` with `expected_goals`, `expected_assists`, `expected_goals_conceded`, `minutes`, `was_home`, `opponent_team`. Nothing is bookmaker-derived.
+- **Terms, cost, auth, cadence, ids.** As in the earlier notes: public, no auth, no stated API terms (site terms forbid commercial use and databases), `bootstrap-static/` cached 300 s, native element ids.
+- **Verdict: usable as baseline and as the input layer for an own model.** Not usable as the projection itself.
+
+### FPL Form (fplform.com)
+
+- **What it has.** Free predicted points per player per fixture for the next 6 gameweeks and rest of season, predicted team goals per fixture, and attacking/defensive fixture difficulty. Per its [help page](https://fplform.com/help), the algorithm "looks at each player's FPL points, xG, xA and absenteeism over this season and last season", weights recent games more, and adjusts for the opponent's points conceded by position, "scoriness" (xG and goals scored) and "porosity" (xGA and goals conceded). No bookmaker odds. "FPL Form updates every hour."
+- **Access.** No API. A CSV export at [`/export-fpl-form-data`](https://fplform.com/export-fpl-form-data) (plain HTML form, `POST export-fpl-form-data.php` with `firstgw`, `lastgw`, `all`), no login. Pulled GW11 to GW12 with extra columns on 2026-11-21: 672 rows, columns `ID,Name,Team,Pos,Price,11_pts_no_prob,11_prob,11_with_prob,12_...`. **`ID` is the FPL element id**: all 672 rows match `bootstrap-static` on id, `web_name` and team short name. `X_prob` is the probability of appearing at all; `X_with_prob` is the headline xP. Sample: Raya `3.40 * 0.94 = 3.20`.
+- **Not there.** No per-player xG or xA projection, no clean sheet probability. Team goals per fixture are published, so a clean sheet probability could be derived as `exp(-predicted opponent goals)`, but that is our derivation, not theirs.
+- **Terms.** The export page: "Some of the data on FPL Form may be exported for personal use in spreadsheets and other analysis tools... You may not share the files or publish the data. If you publish analysis or information that is based on my data, or derived from it, please credit 'FPL Form' and provide a link." The [terms](https://fplform.com/terms) add: personal purposes only (4.3), no republishing or redistribution (4.5.1, 4.5.5), no commercial exploitation (4.5.4), no "systematic or automated data collection" (5.1.4) or robots (5.1.5), obey `robots.txt` (5.1.6). `robots.txt` disallows `/ajax/` and a few internal paths; the export path is allowed. Donations only, no paid tier.
+- **Accuracy.** No figures published. A one-gameweek community comparison (FPL Watchmen, 2025 GW1) had FPL Form within a point of the leader on average error but last at picking high scorers; one week is noise.
+- **Verdict: usable for the owner-only phase, not for a published extension.** The CSV has the right ids and the right shape, and a once-an-hour pull for one user is personal use. Shipping it to other users would be republishing the data, which the terms forbid without permission. Ask the author (Nick Hope, contact on the site) before relying on it beyond that.
+
+### Onside Arena (onsidearena.com)
+
+- **What it has.** New this season. Free per-player xP for the next gameweek ([`/fpl/predicted-points`](https://onsidearena.com/fpl/predicted-points): "Our expected points for all 496 players in GW11"), captain and transfer boards, a Dixon-Coles match model, and a public accuracy log. Its methodology text says the projection draws on "expected goals and assists per 90" and "clean-sheet and bonus probabilities", but only the xP number is exposed; no per-player xG, xA or clean sheet probability is published.
+- **Access.** A no-auth, CORS-open JSON API (`/api/v1/*`) and an MIT MCP server, but per the [integrations page](https://onsidearena.com/integrations) the endpoints are the predicted league table and World Cup tools; **no endpoint returns FPL per-player xP**. The FPL data is a CSV: [`/data/graded-predictions.csv`](https://onsidearena.com/data/graded-predictions.csv), CC-BY-4.0, one row per player per gameweek, columns `gw, deadline_utc, captured_at, model_version, player_id, player_name, onside_xp, fpl_ep_next, form_baseline, season_baseline, actual_points, minutes_qualified, onside_error, fpl_error`. `player_id` is the FPL element id (Raya is 1). 5,450 rows for GW1 to GW11 on 2026-11-21.
+- **Cadence.** Projections are frozen early. From the CSV, `captured_at` precedes `deadline_utc` by 2.5 hours for GW1, then by 5 to 7 days for GW2 to GW10 (captured within hours of the previous deadline), 21 days for GW6 and 14 days for GW11 (international breaks). So the published xP never sees press conferences or late team news. The site says "PROJECTIONS FROZEN 7 NOV, 00:03 UK" for GW11.
+- **Terms.** [Terms](https://onsidearena.com/terms): no scraping "beyond what our published data licence and llms.txt permit"; outputs are owned by Onside with a personal licence; datasets published as open data are CC-BY-4.0. The integrations page: "Data licence CC BY 4.0... free for any use, attribution required." API: "No API key, no rate limit (yet)", server-side cache `max-age=300`. Free tier includes "Onside xPts engine for all 700 players"; Pro £5.99/mo, Pro+ £9.99/mo for planner and optimiser tools.
+- **Accuracy.** The only source here that publishes a graded record. [`/accuracy`](https://onsidearena.com/accuracy): blind test over four seasons (90,150 predictions), MAE per player per gameweek: Onside v7 0.96, FPL `ep_next` (rebuilt historically) 1.06, season average 1.06, recent form 1.33. Live 2026/27 GW1 to GW10, players with 60+ minutes: Onside 2.515 vs FPL 2.685; all graded players including non-starters: Onside 1.681 vs FPL 1.600 (FPL wins that cut, because `ep_next` zeroes injured players late). Self-published, but the frozen rows are in the CSV and can be re-graded.
+- **Verdict: usable as a free benchmark dataset, marginal as a live feed.** The CSV gives us `ep_next`, a third-party xP and actuals per player per gameweek with FPL ids, which is exactly what a backtest of our own model needs. As a live source it is xP only, a week stale, and the HTML page is the only place the current number lives.
+
+### FPL Review (fplreview.com)
+
+- **What it has.** The reference point for the optimisation community. A free model and the premium "Massive Data" model, which [its docs](https://docs.fplreview.com/the-model/projections/massive-data-model/) describe as projecting "Expected Value (EV)" from "market odds", historical performance, xMins and team news, up to 14 gameweeks ahead; "Projections update hourly, though may pause from ~4am to ~7am (UK/IE time)", with "late team news and press conference information" added before each deadline ([FAQ](https://docs.fplreview.com/getting-started/faq/)). The free model "uses a smaller-scale, less advanced dataset as well as more simplified modelling techniques" and a shorter horizon.
+- **Access.** No API. [Premium features](https://docs.fplreview.com/getting-started/premium-features) list "Data Export: Export projections in CSV format" (the file the solver community feeds into tools like FPL-Optimization-Tools) plus "Deadline Access: Priority access during peak traffic around FPL deadlines", which implies the site throttles under load. Premium is via Patreon; the Patreon tier page did not render to the fetch tools, so the price is unverified (a third-party listing says about USD 5/month). The main site is a JS shell (1.8 KB of HTML for every path tried), so nothing can be read without a browser session, and the terms page could not be located.
+- **Ids.** Not verified. The community CSVs carry FPL ids, which is how the solvers join them, but I could not download one.
+- **Accuracy.** Self-published: ["Ultimate Truth"](https://docs.fplreview.com/articles/ultimate-truth/) compares six models on 2022/23 GW1 to GW21 (3,730 shared predictions) against a simulated perfect model. RMSE: perfect 2.806, FPL Review MD 2.803, models B to F 2.816 to 2.884, "everyone scores 2.7" baseline 3.043. MAE 1.957 to 2.115 versus 2.239 for the baseline. R² at best 0.15. The spread between the best and worst real model is 0.08 RMSE; the spread between the best model and a flat guess is 0.24.
+- **Verdict: not usable as a feed.** Paid, export-by-hand, no terms to confirm redistribution rights, likely throttled when we would need it most. The accuracy article is the most useful thing it gives us: it bounds how much any model can gain.
+
+### Fantasy Football Hub
+
+- **What it has.** "AI" predicted points per player ([`/predictions`](https://www.fantasyfootballhub.co.uk/predictions), which renders "AI generating predicted points..." client-side), AI team rating, Opta stats. Method not published. Free tier is team rating and live mode; the Predicted Points Tool sits in Pro. Prices on 2026-11-21 ("Green Friday", for the rest of the season): Starter £18.99, Pro £29.99, Ultra £109.99.
+- **Terms.** [Clause 6.6](https://www.fantasyfootballhub.co.uk/terms-and-conditions): any access "beyond what is explicitly permitted is strictly prohibited" including bots and scripts; scraping prohibited "for personal use, commercial purposes, or redistribution"; 6.8.1 "All data, models, and information provided by our services are the exclusive property of Fantasy Football Hub Ltd"; 6.6.3 forbids using the data to train models without consent. No API.
+- **Accuracy.** None published. Squawka, 90min and Flashscore reprint its weekly captain rankings, so it is a likely source behind "predicted points captaincy pick" posts.
+- **Verdict: not usable.**
+
+### Fantasy Football Fix
+
+- **What it has.** "Projected Points & Stats Tool" in Premium (£3.48/month billed yearly, £6.95 monthly; Premium Plus £3.98/£7.95; Lifetime £295), plus the FPL Plus browser extension that shows "Player Projected Points" on the FPL site, which is the closest existing product to our expected panel. No clean sheet odds mentioned. Method not published.
+- **Terms.** [Section 11](https://www.fantasyfootballfix.com/terms/): data and statistics "are the intellectual property of Fix Sports Stats Ltd or its partners" and "may not be reproduced, used or represented without the express permission". No explicit scraping clause, no API.
+- **Accuracy.** A testimonial and "89% of our users who won their main mini-league". The FPL Watchmen GW1 note says Fix "tended to overestimate points".
+- **Verdict: not usable.** Worth looking at FPL Plus as a UI reference only.
+
+### Fantasy Football Scout
+
+- **What it has.** Rate My Team projected points for 38 gameweeks ([`/fpl/projected-points`](https://www.fantasyfootballscout.co.uk/fpl/projected-points), "Premium projection — unlock with FFS Premium", about £10/month), and a weekly free article "FPL Gameweek N best clean sheet odds" whose percentages come from "the Fantasy Football Scout Fixture Ticker", not a bookmaker ([GW11 article, 2026-11-18](https://www.fantasyfootballscout.co.uk/2026/11/18/fpl-gameweek-11-best-clean-sheet-odds-2)). The table is an image.
+- **Terms.** As recorded in the third-party note: no "mass, automated or systematic extractions", no inclusion in another database.
+- **Verdict: not usable.** Likely the source of the weekly clean-sheet-percentage posts, but the numbers are a model output behind a paywall and in an image.
+
+### "Elite FPL"
+
+Could not be identified. Searches for "Elite FPL" and "elitefpl" return only FFScout's "Elite Captaincy Matrix" and Fix's "Elite XI" reveals. If the ticket meant a specific site, it needs a URL.
+
+### LiveFPL
+
+No projections. The site is live rank, effective ownership and price pages; nothing in its navigation or JSON feeds (listed in the third-party note) is a next-game projection. Not relevant here.
+
+### Bookmaker odds via The Odds API
+
+- **What it has.** A documented REST API ([docs](https://the-odds-api.com/liveapi/guides/v4/)), API key as a query parameter, `soccer_epl` is a listed sport key. Plans: free 500 credits/month, then USD 30 (20k), 59 (100k), 119 (5M), 249 (15M). Cost per call is `markets x regions`; most non-featured markets must be fetched one event at a time via `/v4/sports/{sport}/events/{eventId}/odds`, so a gameweek of 10 fixtures costs 10 calls per market per region. Pre-match odds refresh every 60 s, faster inside six hours of kickoff.
+- **Clean sheets.** There is no clean sheet market key. The [markets page](https://the-odds-api.com/sports-odds-data/betting-markets.html) lists `btts`, `team_totals`, `alternate_team_totals`, `correct_score`, `double_chance`, `draw_no_bet`, `h2h_3_way`, and EPL player props (`player_goal_scorer_anytime`, `player_assists`, `player_shots`). A clean sheet probability is derivable from `team_totals` (opponent under 0.5) or by summing `correct_score` rows with the opponent on zero, after removing the overround. The page says coverage of these markets is "currently limited to US sports and selected bookmakers" and "expanding over time"; whether `team_totals` or `correct_score` actually return for `soccer_epl` is **unverified** (needs a key; the free tier would answer it in one call).
+- **Terms.** [Terms](https://the-odds-api.com/terms-and-conditions.html) permit "Displaying our data in a UI, website, or mobile app, including for commercial use" and "Storing our data and retaining it indefinitely"; they forbid reselling or redistributing "as a standalone data product" or "through your own API, data feed, downloadable files". Attribution optional. That is the most permissive licence of anything here.
+- **Ids.** None. Odds are per fixture by team name, so the join is team name to FPL `teams[].name`, which is 20 strings and trivial. Player props would need a name join.
+- **Verdict: usable later for bookmaker clean sheet odds and anytime-scorer odds, not needed for the first cut.** Betfair's exchange API is the alternative (free delayed key; live key £299 and non-commercial only; a "Clean Sheet" market type exists in community client libraries but the official mapping page could not be fetched). Both add a dependency and a monthly bill for a number our own model can produce to within a few points.
+
+### OpenFPL (open-source model)
+
+An MIT-licensed, position-specific ensemble from an [arXiv paper](https://arxiv.org/abs/2508.09992) (CC-BY) claiming accuracy "comparable to a leading commercial service" over 2024/25 at one to three gameweek horizons. Inference needs samples built "from FPL and Understat APIs"; Understat has been offline since 2 November 2026, so the pipeline is broken as shipped. The [repo](https://github.com/daniegr/OpenFPL) has six commits and a notebook, no CLI. Not a drop-in, but the feature design is a useful reference if we build our own.
+
+## Shortlist
+
+| Source | Outputs we need | Access | Terms for a published extension | Ids | Cadence before deadline | Accuracy record | Verdict |
+|---|---|---|---|---|---|---|---|
+| Official API `ep_next` | xP (form x availability only) | public JSON, free | same as rest of API | element id | refreshes with injury flags, 5 min cache | graded by Onside: MAE 1.06 blind, 2.69 live (60+ min) | baseline only |
+| Official API xG fields | xG/xA/xGC per 90, per match | public JSON, free | same | element id | after each match | n/a (inputs) | **input layer for own model** |
+| FPL Form | xP per fixture, P(appear), team goals | CSV via HTML form, free | personal use only, no publishing or sharing | **element id** (verified) | hourly | none | owner-only phase |
+| Onside Arena | xP | CC-BY CSV; HTML page; API has no FPL player endpoint | CC-BY for the CSV | element id (verified) | frozen 5 to 14 days early | published, self-graded | benchmark set, not a feed |
+| FPL Review | EV, xMins | premium CSV export by hand, Patreon | unknown, site unreadable to tools | unverified | hourly, team news pre-deadline | self-published RMSE 2.80 | not usable |
+| Fantasy Football Hub | xP | web app only | extraction forbidden, data proprietary | n/a | weekly | none | not usable |
+| Fantasy Football Fix | xP | web app, FPL Plus extension | reproduction forbidden | n/a | unknown | none | not usable |
+| FF Scout | xP, team CS % | paywall; CS table as image | extraction forbidden | n/a | weekly article | none | not usable |
+| The Odds API | CS odds (derived), scorer odds | REST, key, free 500/mo | display allowed, redistribution of raw feed forbidden | team name | 60 s | n/a (market) | usable later |
+| Betfair exchange | CS market | REST, free delayed key | non-commercial without licence | team name | live | n/a | not now |
+| OpenFPL | xP | run it yourself | MIT | element id | n/a | paper claims parity with a commercial model | reference only |
+
+## Recommendation: own model, with `ep_next` as the baseline and Onside's CSV as the backtest
+
+Build the expected panel's numbers in `fpl-analysis` from the official API. Reasons:
+
+1. **Nothing external covers the panel.** The panel needs xG, xA, xP and clean sheet odds per player with element ids. FPL Form gives xP only, Onside gives xP only, odds APIs give team-level markets only. Every source would still leave xG, xA and keeper clean sheet odds to us, so we end up writing most of the model anyway.
+2. **Licensing.** The only sources that permit display in a published product are the official API (implicitly), Onside's CSV (CC-BY, but stale) and The Odds API (paid beyond 500 calls). FPL Form is fine for one user and off limits the day the extension is shared.
+3. **The accuracy ceiling is low and close.** FPL Review's study has every real model within 0.08 RMSE of each other and the best within noise of a simulated perfect model. Onside's blind test has a form-and-availability baseline (`ep_next`) 10% worse than its full model. The gains available over `ep_next` come from three things the official API already has: expected minutes (`starts`, `minutes`, `chance_of_playing_next_round`), fixture adjustment (opponent xGC or `strength_*`, venue), and position-specific scoring (clean sheet and bonus). A transparent Poisson-style model with those inputs is enough for a panel whose job is to inform a human, not run a solver.
+4. **Inputs refresh when we need them.** `bootstrap-static` carries injury flags on a 5 minute cache, so the model can be rerun at deadline minus one hour with current availability. Onside freezes a week early; FPL Form is hourly but we cannot ship it.
+
+Sketch of the model, so the shared-package grilling has something concrete to attack:
+
+- Expected minutes: from `starts / appearances`, recent `minutes` and `chance_of_playing_next_round`; output `P(start)`, `P(60+)`.
+- Team goal rates: opponent `expected_goals_conceded_per_90` summed per match from `element-summary` (or from team `strength_attack` vs `strength_defence`, home/away), scaled by venue. Clean sheet odds = `exp(-λ_opponent)`.
+- Player goals and assists: `expected_goals_per_90` and `expected_assists_per_90` times expected minutes, scaled by the fixture factor. Those two numbers are the panel's xG and xA.
+- xP: appearance points by `P(60+)`, goals and assists by position weights, clean sheet by `P(CS) * P(60+)`, a small bonus term, minus expected cards and goals conceded for keepers and defenders.
+- Display `ep_next` alongside as "FPL's own figure" so the user sees when we disagree and why.
+
+Hybrid option, if the owner wants a second opinion during the private phase: pull FPL Form's CSV hourly, join on `ID`, show its xP as a third column with the required credit and link, behind a flag that is off by default and documented as personal-use only. Drop it before any release.
+
+Validation plan: Onside's `graded-predictions.csv` gives `player_id`, `gw`, `fpl_ep_next`, `onside_xp` and `actual_points` for every gameweek so far. Rebuilding our model's inputs for past gameweeks from `element-summary/history[]` and comparing MAE against those two columns is a free, like-for-like test of whether the model beats `ep_next` before anything ships.
+
+## Open questions for the shared-package grilling
+
+1. **Model placement and shape.** Does `fpl-analysis` own the projection end to end (minutes model, team rates, player rates, xP), or does `fpl-api` expose pre-aggregated per-match team xG and xGC so the analysis layer stays pure? The team-level inputs need `element-summary` for every player (672 calls) unless we accept `strength_*` as the fixture factor.
+2. **Minutes.** How do we estimate expected minutes without a lineup source? `starts`, `minutes` and `chance_of_playing_next_round` are all we have; is a last-N-starts share acceptable for the first cut, and what do we show for a player returning from injury?
+3. **Backtest threshold.** What MAE against Onside's CSV (which carries `ep_next` and actuals) makes the own model good enough to display? Beating `ep_next` on the 60+ minute cut is a reasonable bar; do we also require it on all players?
+4. **Goalkeepers.** The panel wants clean sheet odds and xP for keepers. Own model gives `P(CS)` from opponent goal rate; is a saves term worth it (saves are 1 point per 3, and `saves` is in `history[]`)?
+5. **Bookmaker odds.** Is a derived clean sheet probability from The Odds API (`team_totals` or `correct_score`, EPL coverage unverified, 500 free calls a month, 10 calls per gameweek per market) worth a key and a dependency, or do we revisit only if the own model's clean sheet numbers test badly?
+6. **FPL Form in the private phase.** Yes or no to the personal-use hybrid? If yes, who emails the author about what the terms allow once the extension is shared with anyone else?
+7. **Refresh cadence.** When does the model rerun: on every `bootstrap-static` fetch (5 minute cache), once an hour, or on demand when the transfers page opens? Injury flags are the only input that moves between matches.
+8. **Showing `ep_next`.** Do we display FPL's figure next to ours, or only ours? Showing both is honest and cheap, but it is two numbers per card.
+
+## Sources
+
+- Official API, observed 2026-11-21: `https://fantasy.premierleague.com/api/bootstrap-static/` (672 elements; `ep_next` vs `form * chance` check on all of them).
+- FPL Form: [help](https://fplform.com/help), [export page](https://fplform.com/export-fpl-form-data), [terms](https://fplform.com/terms), [predicted goals](https://fplform.com/fpl-predicted-goals), `robots.txt`; CSV pulled 2026-11-21 (GW11 to GW12, extra columns) and joined against `bootstrap-static`.
+- Onside Arena: [accuracy](https://onsidearena.com/accuracy), [methodology](https://onsidearena.com/methodology), [predicted points](https://onsidearena.com/fpl/predicted-points), [data](https://onsidearena.com/data), [integrations](https://onsidearena.com/integrations), [pricing](https://onsidearena.com/pricing), [terms](https://onsidearena.com/terms), `llms.txt`; `graded-predictions.csv` pulled 2026-11-21 (5,450 rows).
+- FPL Review docs: [Massive Data model](https://docs.fplreview.com/the-model/projections/massive-data-model/), [premium features](https://docs.fplreview.com/getting-started/premium-features), [FAQ](https://docs.fplreview.com/getting-started/faq/), [Ultimate Truth](https://docs.fplreview.com/articles/ultimate-truth/). Main site and Patreon tier page returned no readable content.
+- Fantasy Football Hub: [home](https://www.fantasyfootballhub.co.uk/) (prices), [terms](https://www.fantasyfootballhub.co.uk/terms-and-conditions), [predictions](https://www.fantasyfootballhub.co.uk/predictions).
+- Fantasy Football Fix: [premium](https://www.fantasyfootballfix.com/premium/), [terms](https://www.fantasyfootballfix.com/terms/).
+- Fantasy Football Scout: [projected points](https://www.fantasyfootballscout.co.uk/fpl/projected-points), [GW11 clean sheet odds](https://www.fantasyfootballscout.co.uk/2026/11/18/fpl-gameweek-11-best-clean-sheet-odds-2).
+- The Odds API: [home and pricing](https://the-odds-api.com/), [v4 docs](https://the-odds-api.com/liveapi/guides/v4/), [markets](https://the-odds-api.com/sports-odds-data/betting-markets.html), [sports list](https://the-odds-api.com/sports-odds-data/sports-apis.html), [update intervals](https://the-odds-api.com/sports-odds-data/update-intervals.html), [terms](https://the-odds-api.com/terms-and-conditions.html), [EPL page](https://the-odds-api.com/sports/epl-odds.html).
+- Betfair: developer docs on app keys (delayed free, live £299, non-commercial) via search snippets; market type mapping page not reachable.
+- OpenFPL: [arXiv 2508.09992](https://arxiv.org/abs/2508.09992), [repo](https://github.com/daniegr/OpenFPL).
+- Community comparison: [FPL Watchmen, 2025 GW1](https://fplwatchmen.substack.com/p/fpl-2025-gw1-analysis-of-prediction).
+- Not reachable: the three reddit.com threads (blocked for automated clients), attackingfootball.com clean sheet odds page (403), fplreview.com main site (JS shell), patreon.com/fplreview tiers (did not render).
